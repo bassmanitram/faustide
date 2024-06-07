@@ -31,6 +31,7 @@ export type TDrawOptions = {
     fftOverlap: 1 | 2 | 4 | 8;
     freqEstimated?: number;
     sampleRate?: number;
+    xLogMode?: 0 | 2 | 10;
 }
 
 export class StaticScope {
@@ -51,7 +52,7 @@ export class StaticScope {
     private _zoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
     private _vzoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
     private _zoomOffset = { oscilloscope: 0, spectroscope: 0, spectrogram: 0 };
-    data: TDrawOptions = { drawMode: "manual", t: undefined, $: 0, $buffer: 0, bufferSize: 128, fftSize: 256, fftOverlap: 2 };
+    data: TDrawOptions = { drawMode: "manual", t: undefined, $: 0, $buffer: 0, bufferSize: 128, fftSize: 256, fftOverlap: 2, xLogMode: 0 };
     cursor: { x: number; y: number };
     dragging: boolean = false;
     spectTempCtx: CanvasRenderingContext2D;
@@ -309,59 +310,139 @@ export class StaticScope {
             this.drawStats(ctx, w, h, statsToDraw);
         }
     }
-    static drawSpectroscope(ctx: CanvasRenderingContext2D, w: number, h: number, d: TDrawOptions, zoom: number, zoomOffset: number, cursor?: { x: number; y: number }) {
-        this.drawBackground(ctx, w, h);
-        if (!d) return;
-        const { $, f, fftSize, fftOverlap } = d;
-        if (!f || !f.length || !f[0].length) return;
+    static drawSpectroscope(
+        canvas: CanvasRenderingContext2D, // canvas for the scope
+        canvasWidth: number, // width of the canvas
+        canvasHeight: number, // height of the canvas
+        drawOptions: TDrawOptions, // Current draw options
+        zoom: number, // Current zoom factor
+        zoomOffset: number, // Zoom offset
+        cursor?: { x: number; y: number } // Optional cursor position
+    ) {
+        // Fill the background
+        this.drawBackground(canvas, canvasWidth, canvasHeight);
+        // If we have no TDrawOptions then bug out
+        if (!drawOptions) return;
+        // Get the draw options that interest us:
+        const {
+            $, // Start sample index
+            f, // Frequency-domain data [f[n] has channel-n data, f.length is number of channels]
+            fftSize, // fft block size (2**n where n can be 8 thru 16)
+            fftOverlap, // fft overlap (2**m where m can be 0 thru 3)
+            xLogMode // Whether using linear or logarithmic scaling on the X axis
+        } = drawOptions;
+        // If there isn't any usable data, then bug out
+        if (!f /* no data */|| !f.length /* no channels */ || !f[0].length /* no data in channels */) return;
+
+        const channels = f.length;
+
+        // The number of frequencies we have data for
         const fftBins = fftSize / 2;
-        let $f = $ * fftOverlap / 2;
-        $f -= $f % fftBins;
-        const l = f[0].length;
-        const $0 = l - fftBins + Math.round(fftBins * zoomOffset);
-        const $1 = l - fftBins + Math.round(fftBins / zoom + fftBins * zoomOffset);
-        const left = 50;
-        const bottom = 20;
-        const hCh = (h - bottom) / f.length;
-        const eventsToDraw = this.drawGrid(ctx, w, h, $0, $1, 0, 1, d, EScopeMode.Spectroscope);
-        const gridX = (w - left) / ($1 - $0 - 1);
-        const step = Math.max(1, Math.round(1 / gridX));
-        for (let i = 0; i < f.length; i++) {
-            ctx.beginPath();
-            ctx.fillStyle = f.length === 1 ? "white" : `hsl(${i * 60}, 100%, 85%)`;
-            let maxInStep;
-            for (let j = $0; j < $1; j++) {
-                const $j = wrap(j, $f, l);
-                const samp = f[i][$j];
-                const $step = (j - $0) % step;
-                if ($step === 0) maxInStep = samp;
-                if ($step !== step - 1) {
-                    if ($step !== 0 && samp > maxInStep) maxInStep = samp;
-                    continue;
+
+        // l is the length data
+        const dataPtsPerChannel = f[0].length;
+
+        const yAxisFromLeft = 50;
+        const xAxisFromBottom = 20;
+        const xWidth = canvasWidth - yAxisFromLeft;
+        const channelHeight = (canvasHeight - xAxisFromBottom) / channels;
+
+        // Derive the start and end indexes we are REALLY dealing with
+        const samplesStart = dataPtsPerChannel - fftBins + Math.round(fftBins * zoomOffset);
+        const samplesEnd = dataPtsPerChannel - fftBins + Math.round(fftBins / zoom + fftBins * zoomOffset);
+        const sampleCount = samplesEnd - samplesStart - 1;
+
+        // get the "events to draw"
+        const eventsToDraw = this.drawGrid(
+            canvas, // The canvas
+            canvasWidth, //   The canvas width
+            canvasHeight, //   The canvas height
+            samplesStart,
+            samplesEnd,
+            0, //   The X scale zero
+            1, //   The Y scale factor
+            drawOptions, //   The draw options
+            EScopeMode.Spectroscope // the type of scope we are drawing
+        );
+
+        let startOfBins = $ * fftOverlap / 2;
+        startOfBins -= startOfBins % fftBins;
+
+        const xWidthPerSample = xWidth / sampleCount;
+        const samplesPerXStep = Math.max(1, Math.round(1 / xWidthPerSample));
+        // For each channel...
+        for (let channel = 0; channel < channels; channel++) {
+            let totalInStep = 0;
+            let numInStep = 0;
+            canvas.beginPath();
+            canvas.strokeStyle = channels === 1 ? "white" : `hsl(${channel * 60}, 100%, 85%)`;
+            if (xLogMode) {
+                const logFunc = xLogMode === 2 ? Math.log2 : Math.log10;
+                const powerSpace = xLogMode === 2 ? 18 : 6;
+                const lastSample = samplesEnd - samplesStart - 1;
+                const pixelsPerPower = xWidth / powerSpace;
+                let nextX = 0;
+                for (let j = samplesStart; j < samplesEnd; j++) {
+                    const relativeIndex = j - samplesStart;
+                    if (relativeIndex < 1) continue; // basically avoid "log10(0)" :)
+
+                    const sampleIndex = wrap(j, startOfBins, dataPtsPerChannel);
+                    const sample = f[channel][sampleIndex];
+                    totalInStep += sample;
+                    numInStep++;
+
+                    const x = logFunc(relativeIndex) * pixelsPerPower + yAxisFromLeft;
+                    if (x < nextX && relativeIndex < lastSample) continue;
+
+                    const y = channelHeight * (channel + 1 - Math.min(1, Math.max(0, (totalInStep / numInStep) / 100 + 1)));
+                    if (nextX === 1) canvas.moveTo(x, y);
+                    else canvas.lineTo(x, y);
+                    nextX = x + xWidthPerSample;
+                    totalInStep = 0;
+                    numInStep = 0;
                 }
-                const x = (j - $0) * gridX + left;
-                const y = hCh * (i + 1 - Math.min(1, Math.max(0, maxInStep / 100 + 1)));
-                if (j === $0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
+                canvas.lineTo(canvasWidth, channelHeight * (channel + 1));
+                canvas.lineTo(yAxisFromLeft, channelHeight * (channel + 1));
+                canvas.stroke();
+            } else {
+                canvas.fillStyle = channels === 1 ? "white" : `hsl(${channel * 60}, 100%, 85%)`;
+                for (let j = samplesStart; j < samplesEnd; j++) {
+                    const relativeIndex = j - samplesStart;
+                    const $j = wrap(j, startOfBins, dataPtsPerChannel);
+                    const sample = f[channel][$j];
+                    const $step = relativeIndex % samplesPerXStep;
+                    // First sample in step
+                    if ($step === 0) totalInStep = sample;
+
+                    // Not last sample in step sample in step
+                    if ($step !== samplesPerXStep - 1) {
+                        if ($step !== 0 && sample > totalInStep) totalInStep = sample;
+                        continue;
+                    }
+                    const x = relativeIndex * xWidthPerSample + yAxisFromLeft;
+                    const y = channelHeight * (channel + 1 - Math.min(1, Math.max(0, totalInStep / 100 + 1)));
+                    if (j === samplesStart) canvas.moveTo(x, y);
+                    else canvas.lineTo(x, y);
+                }
+                canvas.lineTo(canvasWidth, channelHeight * (channel + 1));
+                canvas.lineTo(yAxisFromLeft, channelHeight * (channel + 1));
+                canvas.closePath();
+                canvas.fill();
             }
-            ctx.lineTo(w, hCh * (i + 1));
-            ctx.lineTo(left, hCh * (i + 1));
-            ctx.closePath();
-            ctx.fill();
         }
-        eventsToDraw.forEach(params => this.drawEvent(ctx, w, h, ...params));
-        if (cursor && cursor.x > left && cursor.y < h - bottom) {
+        eventsToDraw.forEach(params => this.drawEvent(canvas, canvasWidth, canvasHeight, ...params));
+        if (cursor && cursor.x > yAxisFromLeft && cursor.y < canvasHeight - xAxisFromBottom) {
             const statsToDraw: TStatsToDraw = { values: [] };
-            const $cursor = $0 + Math.round((cursor.x - left) / gridX);
+            const $cursor = samplesStart + Math.round((cursor.x - yAxisFromLeft) / xWidthPerSample);
             statsToDraw.values = [];
-            statsToDraw.x = ($cursor - $0) * gridX + left;
-            statsToDraw.xLabel = indexToFreq($cursor, fftBins, d.sampleRate).toFixed(0);
-            const $j = wrap($cursor, $f, l);
+            statsToDraw.x = ($cursor - samplesStart) * xWidthPerSample + yAxisFromLeft;
+            statsToDraw.xLabel = indexToFreq($cursor, fftBins, drawOptions.sampleRate).toFixed(0);
+            const $j = wrap($cursor, startOfBins, dataPtsPerChannel);
             for (let i = 0; i < f.length; i++) {
                 const samp = f[i][$j];
                 if (typeof samp === "number") statsToDraw.values.push(samp);
             }
-            this.drawStats(ctx, w, h, statsToDraw);
+            this.drawStats(canvas, canvasWidth, canvasHeight, statsToDraw);
         }
     }
     static drawSpectrogram(ctx: CanvasRenderingContext2D, tempCtx: CanvasRenderingContext2D, w: number, h: number, d: TDrawOptions, zoom: number, zoomOffset: number, cursor?: { x: number; y: number }) {
@@ -462,82 +543,151 @@ export class StaticScope {
         ctx.fillRect(0, 0, w, h);
         ctx.restore();
     }
-    static drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number, $0: number, $1: number, $zerox: number, yFactor: number, d: TDrawOptions, mode: EScopeMode) {
-        ctx.save();
-        ctx.setLineDash([]);
-        ctx.lineWidth = 1;
-        const { t, e, bufferSize, fftSize, fftOverlap, sampleRate } = d;
+    static drawGrid(
+        canvas: CanvasRenderingContext2D, // Canvas
+        canvasWidth: number, // canvas width
+        canvasHeight: number, // canvas height
+        samplesStart: number,
+        samplesEnd: number,
+        $zerox: number,
+        yFactor: number,
+        d: TDrawOptions,
+        mode: EScopeMode
+    ) {
+        canvas.save();
+        canvas.setLineDash([]);
+        canvas.lineWidth = 1;
+        const {
+            t, // Time-domain data
+            e, // gfds
+            bufferSize, // buffer size
+            fftSize, // fft block size
+            fftOverlap, // fft overlap
+            sampleRate, // sample rate
+            xLogMode
+        } = d;
+
+        // Frequency domain if drawing a Spectro-thing
         const inFreqDomain = mode === EScopeMode.Spectrogram || mode === EScopeMode.Spectroscope;
+        // The number of frequencies
         const fftBins = fftSize / 2;
+        // The number of channels
         const channels = mode === EScopeMode.Oscilloscope ? 1 : t.length;
-        const unit = mode === EScopeMode.Spectrogram ? "Hz/frame" : mode === EScopeMode.Spectroscope ? "dB/Hz" : "lvl/samp";
+        // Scale units text
+        const unit = mode === EScopeMode.Spectrogram ? "Hz/frame" : mode === EScopeMode.Spectroscope ? "dB/Hz(log10)" : "lvl/samp";
+
+        // The array of events to draw
         const eventsToDraw: [number, { type: string; data: any }[]][] = [];
-        let $0buffer = $0 / bufferSize / (inFreqDomain ? fftOverlap / 2 : 1);
-        let $1buffer = $1 / bufferSize / (inFreqDomain ? fftOverlap / 2 : 1);
+
+        let $0buffer = samplesStart / bufferSize / (inFreqDomain ? fftOverlap / 2 : 1);
+        let $1buffer = samplesEnd / bufferSize / (inFreqDomain ? fftOverlap / 2 : 1);
         const hStep = 2 ** Math.ceil(Math.log2($1buffer - $0buffer)) / 8;
+
         $0buffer -= $0buffer % hStep;
         $1buffer -= $0buffer % hStep;
+
         let $buffer = (d.$buffer || 0) + Math.round($zerox / bufferSize / (inFreqDomain ? fftOverlap / 2 : 1));
         if (inFreqDomain) $buffer -= $buffer % (fftBins / bufferSize / fftOverlap / 2);
-        const left = 50;
-        const bottom = 20;
-        const eventStrokeStyle = "#ff8800";
-        const bufferStrokeStyle = "#004000";
-        const normalStrokeStyle = "#404040";
-        ctx.fillStyle = "#DDDD99";
-        ctx.font = "10px Consolas, monospace";
-        ctx.textAlign = "right";
-        ctx.textBaseline = "middle";
-        ctx.fillText(unit, 45, h - 10, 40);
-        ctx.textAlign = "center";
-        ctx.strokeStyle = "white";
-        ctx.beginPath();
-        ctx.moveTo(left, 0);
-        ctx.lineTo(left, h - bottom);
-        ctx.lineTo(w, h - bottom);
-        ctx.stroke();
-        ctx.strokeStyle = bufferStrokeStyle;
-        for (let j = $0buffer; j < $1buffer; j += hStep) {
-            const $fft = j / (fftBins / bufferSize) * fftOverlap / 2;
-            const x = (j * bufferSize * (inFreqDomain ? fftOverlap / 2 : 1) - $0) / ($1 - $0 - 1) * (w - left) + left;
-            if (x < left) continue;
-            ctx.strokeStyle = j % 1 === 0 ? bufferStrokeStyle : normalStrokeStyle;
-            ctx.beginPath();
-            ctx.moveTo(x, 0);
-            ctx.lineTo(x, h - bottom);
-            ctx.stroke();
-            if (mode === EScopeMode.Spectrogram) {
-                if ($fft % 1 === 0) ctx.fillText($fft.toFixed(), Math.min(x, w - 20), h - 10);
-            } else if (mode === EScopeMode.Spectroscope) {
-                ctx.fillText((($fft % 1) * sampleRate / 2).toFixed(), Math.min(x, w - 20), h - 10);
-            } else {
-                ctx.fillText((j * bufferSize).toFixed(), Math.min(x, w - 20), h - 10);
+
+        const yAxisFromLeft = 50;
+        const xAxisFromBottom = 20;
+        const eventStrokeStyle = "#ff8800"; //  Orangy yellow
+        const bufferStrokeStyle = "#004000"; // Feint green (the vertical lines)
+        const normalStrokeStyle = "#404040"; // 75% Grey (the horizontal lines)
+        canvas.fillStyle = "#DDDD99"; //        Light greeny/yellow
+        canvas.font = "10px Consolas, monospace";
+        canvas.textAlign = "right";
+        canvas.textBaseline = "middle";
+        canvas.fillText(unit, 45, canvasHeight - 10, 40);
+        canvas.textAlign = "center";
+        canvas.strokeStyle = "white";
+
+        // Draw
+        canvas.beginPath();
+        canvas.moveTo(yAxisFromLeft, 0); // Top of Y axis
+        canvas.lineTo(yAxisFromLeft, canvasHeight - xAxisFromBottom); // Draw the Y axis
+        canvas.lineTo(canvasWidth, canvasHeight - xAxisFromBottom); //   Draw the X axis
+        canvas.stroke(); // Fill the paths in in white
+
+        // Change to Feint green X marker lines
+        canvas.strokeStyle = bufferStrokeStyle;
+
+        if (xLogMode) {
+            const $xLogMode = xLogMode === 2 ? 2 : 10;
+            const logFunc = $xLogMode === 2 ? Math.log2 : Math.log10;
+            // We have evenly spaced X guidelines at 1, 10, 100, 1000, 10000, 100000
+            // i.e. the X space is divided into 7.
+            const xWidth = canvasWidth - yAxisFromLeft;
+            const markers = [];
+            for (let i = 1; i < 100000; i *= $xLogMode) {
+                markers.push(i.toFixed());
             }
-        }
-        if (e) {
-            ctx.strokeStyle = eventStrokeStyle;
-            for (let j = Math.ceil($0buffer); j < $1buffer; j++) {
-                if (e[$buffer + j] && e[$buffer + j].length) {
-                    const x = (j * bufferSize * (inFreqDomain ? fftOverlap / 2 : 1) - $0) / ($1 - $0 - 1) * (w - left) + left;
-                    if (x < left) continue;
-                    eventsToDraw.push([x, e[$buffer + j]]);
-                    ctx.beginPath();
-                    ctx.moveTo(x, 0);
-                    ctx.lineTo(x, h - bottom);
-                    ctx.stroke();
+            const coordSpace = xWidth / (markers.length + 1);
+            for (let c = 0; c < markers.length; ++c) {
+                canvas.strokeStyle = c > 0 ? bufferStrokeStyle : "white";
+                const x = (c * coordSpace) + yAxisFromLeft;
+                canvas.beginPath();
+                canvas.moveTo(x, 0);
+                canvas.lineTo(x, canvasHeight - xAxisFromBottom);
+                canvas.stroke();
+                canvas.fillText(markers[c], Math.min(x, canvasWidth - 20), canvasHeight - 10);
+
+                canvas.strokeStyle = bufferStrokeStyle;
+                // Now lines at 2-9, and
+                const x1 = Math.min(((c + 1) * coordSpace) + yAxisFromLeft, canvasWidth);
+                const xyWidth = x1 - x;
+                for (let t = 2; t < xLogMode; ++t) {
+                    canvas.beginPath();
+                    const lineX = (x + (logFunc(t) * xyWidth));
+                    canvas.moveTo(lineX, 0);
+                    canvas.lineTo(lineX, canvasHeight - xAxisFromBottom);
+                    canvas.stroke();
+                }
+            }
+        } else {
+            // Basically draw the guidelines - but the code is SO opaque!
+            for (let j = $0buffer; j < $1buffer; j += hStep) {
+                const $fft = j / (fftBins / bufferSize) * fftOverlap / 2;
+                const x = (j * bufferSize * (inFreqDomain ? fftOverlap / 2 : 1) - samplesStart) / (samplesEnd - samplesStart - 1) * (canvasWidth - yAxisFromLeft) + yAxisFromLeft;
+                if (x < yAxisFromLeft) continue;
+                canvas.strokeStyle = j % 1 === 0 ? bufferStrokeStyle : normalStrokeStyle;
+                canvas.beginPath();
+                canvas.moveTo(x, 0);
+                canvas.lineTo(x, canvasHeight - xAxisFromBottom);
+                canvas.stroke();
+                if (mode === EScopeMode.Spectrogram) { // TODO: Create 10**n labels
+                    if ($fft % 1 === 0) canvas.fillText($fft.toFixed(), Math.min(x, canvasWidth - 20), canvasHeight - 10);
+                } else if (mode === EScopeMode.Spectroscope) {
+                    canvas.fillText((($fft % 1) * sampleRate / 2).toFixed(), Math.min(x, canvasWidth - 20), canvasHeight - 10);
+                } else {
+                    canvas.fillText((j * bufferSize).toFixed(), Math.min(x, canvasWidth - 20), canvasHeight - 10);
                 }
             }
         }
-        ctx.strokeStyle = normalStrokeStyle;
-        const hCh = (h - bottom) / channels;
+        if (e) {
+            canvas.strokeStyle = eventStrokeStyle;
+            for (let j = Math.ceil($0buffer); j < $1buffer; j++) {
+                if (e[$buffer + j] && e[$buffer + j].length) {
+                    const x = (j * bufferSize * (inFreqDomain ? fftOverlap / 2 : 1) - samplesStart) / (samplesEnd - samplesStart - 1) * (canvasWidth - yAxisFromLeft) + yAxisFromLeft;
+                    if (x < yAxisFromLeft) continue;
+                    eventsToDraw.push([x, e[$buffer + j]]);
+                    canvas.beginPath();
+                    canvas.moveTo(x, 0);
+                    canvas.lineTo(x, canvasHeight - xAxisFromBottom);
+                    canvas.stroke();
+                }
+            }
+        }
+        canvas.strokeStyle = normalStrokeStyle;
+        const hCh = (canvasHeight - xAxisFromBottom) / channels;
         let vStep = 0.25;
         while (yFactor / vStep > 2) vStep *= 2; // Maximum horizontal grids in channel one side = 2
-        ctx.beginPath();
-        ctx.textAlign = "right";
+        canvas.beginPath();
+        canvas.textAlign = "right";
         const drawHLine = (y: number, yLabel: string) => {
-            ctx.moveTo(left, y);
-            ctx.lineTo(w, y);
-            ctx.fillText(yLabel, 45, Math.max(y, 10));
+            canvas.moveTo(yAxisFromLeft, y);
+            canvas.lineTo(canvasWidth, y);
+            canvas.fillText(yLabel, 45, Math.max(y, 10));
         };
         for (let i = 0; i < channels; i++) {
             let y = (i + 0.5) * hCh;
@@ -556,19 +706,19 @@ export class StaticScope {
                 drawHLine(y, yLabel);
             }
         }
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.setLineDash([4, 2]);
-        ctx.strokeStyle = "white";
+        canvas.stroke();
+        canvas.beginPath();
+        canvas.setLineDash([4, 2]);
+        canvas.strokeStyle = "white";
         for (let i = 1; i < channels; i++) {
-            ctx.moveTo(0, i * hCh);
-            ctx.lineTo(w, i * hCh);
+            canvas.moveTo(0, i * hCh);
+            canvas.lineTo(canvasWidth, i * hCh);
         }
-        ctx.stroke();
-        ctx.restore();
+        canvas.stroke();
+        canvas.restore();
         return eventsToDraw;
     }
-    static drawEvent(ctx: CanvasRenderingContext2D, w: number, h: number, x: number, e: { type: string; data: any }[]) {
+    static drawEvent(ctx: CanvasRenderingContext2D, w: number, h: number, x: number, e: { type: string; data: any }[], xLogMode = 0) {
         ctx.save();
         ctx.font = "bold 12px Consolas, monospace";
         ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
@@ -980,6 +1130,7 @@ export class StaticScope {
         this._zoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
         this._zoomOffset = { oscilloscope: 0, spectroscope: 0, spectrogram: 0 };
     }
+
     get mode() {
         return this._mode;
     }
