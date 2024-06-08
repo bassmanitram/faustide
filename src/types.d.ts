@@ -14,7 +14,6 @@ type FaustEditorCompileOptions = {
     plotFFT: 256 | 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536;
     plotFFTOverlap: 1 | 2 | 4 | 8;
     drawSpectrogram: boolean;
-    xLogMode: 0 | 2 | 10;
     args: string[];
     enableGuiBuilder: boolean;
     guiBuilderUrl: string;

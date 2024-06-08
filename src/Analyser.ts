@@ -1,5 +1,5 @@
 import { FFTR } from "kissfft-js";
-import { TDrawOptions } from "./StaticScope";
+import { TDrawOptions, TXLogMode } from "./StaticScope";
 import { sliceWrap, getFrequencyDomainData, setWrap, estimateFreq } from "./utils";
 
 /**
@@ -79,7 +79,7 @@ export class Analyser {
     drawHandler: (options: TDrawOptions) => any;
     freqEstimated: number;
 
-    xLogMode: 0 | 2 | 10;
+    xLogMode: TXLogMode;
 
     constructor(buffers?: number, drawMode?: "offline" | "continuous" | "onevent" | "manual", drawHandler?: (options: TDrawOptions) => any) {
         this.buffers = buffers || 0;
@@ -88,6 +88,7 @@ export class Analyser {
         this._fftOverlap = 2;
         this.capturing = -1;
         this.fftSize = 256;
+        this.xLogMode = new TXLogMode(0);
     }
     initCache(bufferSize: number, channels: number) {
         const buffers = this.drawMode === "offline" ? 1 : this.buffers;

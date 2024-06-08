@@ -26,7 +26,7 @@ import "bootstrap/js/dist/modal";
 import "@fortawesome/fontawesome-free/css/all.css";
 import "bootstrap/scss/bootstrap.scss";
 import "./index.scss";
-import { StaticScope } from "./StaticScope";
+import { StaticScope, TXLogMode } from "./StaticScope";
 import { Analyser } from "./Analyser";
 import { FileManager } from "./FileManager";
 import { GainUI, createMeterNode, MeterNode } from "./MeterNode";
@@ -504,7 +504,6 @@ $(async () => {
         plotFFT: 256,
         plotFFTOverlap: 2,
         drawSpectrogram: false,
-        xLogMode: 0,
         enableGuiBuilder: false,
         guiBuilderUrl: "https://mainline.i3s.unice.fr/fausteditorweb/dist/PedalEditor/Front-End/",
         exportPlatform: "source",
@@ -765,8 +764,7 @@ $(async () => {
         saveEditorParams();
     });
     $<HTMLInputElement>("#select-x-scaling").on("change", (e) => {
-        compileOptions.xLogMode = +e.currentTarget.value as 0 | 2 | 10;
-        uiEnv.analyser.xLogMode = compileOptions.xLogMode;
+        uiEnv.analyser.xLogMode = new TXLogMode(+e.currentTarget.value as 0 | 2 | 10);
         saveEditorParams();
     });
     /**
@@ -1782,7 +1780,7 @@ $(async () => {
     $("#select-plot-mode").children(`option[value=${compileOptions.plotMode}]`).prop("selected", true).change();
     $("#select-plot-fftsize").children(`option[value=${compileOptions.plotFFT}]`).prop("selected", true).change();
     $("#select-plot-fftoverlap").children(`option[value=${compileOptions.plotFFTOverlap}]`).prop("selected", true).change();
-    $("#select-x-scaling").children(`option[value=${compileOptions.xLogMode}]`).prop("selected", true).change();
+    $("#select-x-scaling").children(`option[value=${uiEnv.analyser.xLogMode.logBase}]`).prop("selected", true).change();
     $("#input-plot-samps").change();
     $("#check-draw-spectrogram").change();
     $<HTMLInputElement>("#check-realtime-compile")[0].checked = compileOptions.realtimeCompile;

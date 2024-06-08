@@ -19,6 +19,33 @@ type TStatsToDraw = {
     yLabel?: string;
     values: number[];
 };
+
+export class TXLogMode {
+    _logBase: 0 | 2 | 10;
+    _logFunc?: any;
+    constructor(base: 0 | 2 | 10) {
+        this._logBase = base;
+        if (base) this._logFunc = base === 2 ? Math.log2 : Math.log10;
+    }
+    get logBase() { return this._logBase; }
+    get logFunc() { return this._logFunc; }
+    getPowerSteps(sampleRate: number): { powers: number; suffixSteps: number; interPowerFactor: number } {
+        const nyquist = sampleRate / 2;
+        let powers = 0;
+        for (; this.logBase ** powers < nyquist; powers++);
+        powers -= 1;
+        let suffixSteps = 1;
+        const lastPower = this.logBase ** powers;
+        for (; lastPower + (lastPower * suffixSteps) < nyquist; suffixSteps++);
+        const interPowerFactor = 1 / (powers + this.logFunc(suffixSteps + 2));
+        return {
+            powers,
+            suffixSteps,
+            interPowerFactor
+        };
+    }
+}
+
 export type TDrawOptions = {
     drawMode: "offline" | "continuous" | "onevent" | "manual";
     $: number; // start sample index
@@ -31,7 +58,7 @@ export type TDrawOptions = {
     fftOverlap: 1 | 2 | 4 | 8;
     freqEstimated?: number;
     sampleRate?: number;
-    xLogMode?: 0 | 2 | 10;
+    xLogMode?: TXLogMode;
 }
 
 export class StaticScope {
@@ -52,7 +79,7 @@ export class StaticScope {
     private _zoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
     private _vzoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
     private _zoomOffset = { oscilloscope: 0, spectroscope: 0, spectrogram: 0 };
-    data: TDrawOptions = { drawMode: "manual", t: undefined, $: 0, $buffer: 0, bufferSize: 128, fftSize: 256, fftOverlap: 2, xLogMode: 0 };
+    data: TDrawOptions = { drawMode: "manual", t: undefined, $: 0, $buffer: 0, bufferSize: 128, fftSize: 256, fftOverlap: 2, xLogMode: new TXLogMode(0) };
     cursor: { x: number; y: number };
     dragging: boolean = false;
     spectTempCtx: CanvasRenderingContext2D;
@@ -329,8 +356,10 @@ export class StaticScope {
             f, // Frequency-domain data [f[n] has channel-n data, f.length is number of channels]
             fftSize, // fft block size (2**n where n can be 8 thru 16)
             fftOverlap, // fft overlap (2**m where m can be 0 thru 3)
-            xLogMode // Whether using linear or logarithmic scaling on the X axis
+            xLogMode, // Whether using linear or logarithmic scaling on the X axis
+            sampleRate
         } = drawOptions;
+
         // If there isn't any usable data, then bug out
         if (!f /* no data */|| !f.length /* no channels */ || !f[0].length /* no data in channels */) return;
 
@@ -347,6 +376,12 @@ export class StaticScope {
         const xWidth = canvasWidth - yAxisFromLeft;
         const channelHeight = (canvasHeight - xAxisFromBottom) / channels;
 
+        // The Log10/2 stuff
+        const {
+            logBase,
+            logFunc
+        } = xLogMode;
+
         // Derive the start and end indexes we are REALLY dealing with
         const samplesStart = dataPtsPerChannel - fftBins + Math.round(fftBins * zoomOffset);
         const samplesEnd = dataPtsPerChannel - fftBins + Math.round(fftBins / zoom + fftBins * zoomOffset);
@@ -362,7 +397,8 @@ export class StaticScope {
             0, //   The X scale zero
             1, //   The Y scale factor
             drawOptions, //   The draw options
-            EScopeMode.Spectroscope // the type of scope we are drawing
+            EScopeMode.Spectroscope, // the type of scope we are drawing
+            xLogMode
         );
 
         let startOfBins = $ * fftOverlap / 2;
@@ -372,34 +408,35 @@ export class StaticScope {
         const samplesPerXStep = Math.max(1, Math.round(1 / xWidthPerSample));
         // For each channel...
         for (let channel = 0; channel < channels; channel++) {
-            let totalInStep = 0;
-            let numInStep = 0;
+            let maxInStep = 0;
+
             canvas.beginPath();
             canvas.strokeStyle = channels === 1 ? "white" : `hsl(${channel * 60}, 100%, 85%)`;
-            if (xLogMode) {
-                const logFunc = xLogMode === 2 ? Math.log2 : Math.log10;
-                const powerSpace = xLogMode === 2 ? 18 : 6;
+            if (logBase) {
+                const { interPowerFactor } = xLogMode.getPowerSteps(sampleRate);
+                const pixelsPerPower = xWidth * interPowerFactor;
+
                 const lastSample = samplesEnd - samplesStart - 1;
-                const pixelsPerPower = xWidth / powerSpace;
                 let nextX = 0;
                 for (let j = samplesStart; j < samplesEnd; j++) {
                     const relativeIndex = j - samplesStart;
-                    if (relativeIndex < 1) continue; // basically avoid "log10(0)" :)
 
-                    const sampleIndex = wrap(j, startOfBins, dataPtsPerChannel);
-                    const sample = f[channel][sampleIndex];
-                    totalInStep += sample;
-                    numInStep++;
+                    const frequency = indexToFreq(j, fftBins, drawOptions.sampleRate);
+                    const x = logFunc(frequency) * pixelsPerPower + yAxisFromLeft;
 
-                    const x = logFunc(relativeIndex) * pixelsPerPower + yAxisFromLeft;
-                    if (x < nextX && relativeIndex < lastSample) continue;
+                    const sample = f[channel][wrap(j, startOfBins, dataPtsPerChannel)];
+                    if (maxInStep === 0) maxInStep = sample;
 
-                    const y = channelHeight * (channel + 1 - Math.min(1, Math.max(0, (totalInStep / numInStep) / 100 + 1)));
+                    if (x < nextX && relativeIndex < lastSample) {
+                        if (sample > maxInStep) maxInStep = sample;
+                        continue;
+                    }
+
+                    const y = channelHeight * (channel + 1 - Math.min(1, Math.max(0, maxInStep / 100 + 1)));
                     if (nextX === 1) canvas.moveTo(x, y);
                     else canvas.lineTo(x, y);
                     nextX = x + xWidthPerSample;
-                    totalInStep = 0;
-                    numInStep = 0;
+                    maxInStep = 0;
                 }
                 canvas.lineTo(canvasWidth, channelHeight * (channel + 1));
                 canvas.lineTo(yAxisFromLeft, channelHeight * (channel + 1));
@@ -412,15 +449,15 @@ export class StaticScope {
                     const sample = f[channel][$j];
                     const $step = relativeIndex % samplesPerXStep;
                     // First sample in step
-                    if ($step === 0) totalInStep = sample;
+                    if ($step === 0) maxInStep = sample;
 
                     // Not last sample in step sample in step
                     if ($step !== samplesPerXStep - 1) {
-                        if ($step !== 0 && sample > totalInStep) totalInStep = sample;
+                        if ($step !== 0 && sample > maxInStep) maxInStep = sample;
                         continue;
                     }
                     const x = relativeIndex * xWidthPerSample + yAxisFromLeft;
-                    const y = channelHeight * (channel + 1 - Math.min(1, Math.max(0, totalInStep / 100 + 1)));
+                    const y = channelHeight * (channel + 1 - Math.min(1, Math.max(0, maxInStep / 100 + 1)));
                     if (j === samplesStart) canvas.moveTo(x, y);
                     else canvas.lineTo(x, y);
                 }
@@ -433,11 +470,23 @@ export class StaticScope {
         eventsToDraw.forEach(params => this.drawEvent(canvas, canvasWidth, canvasHeight, ...params));
         if (cursor && cursor.x > yAxisFromLeft && cursor.y < canvasHeight - xAxisFromBottom) {
             const statsToDraw: TStatsToDraw = { values: [] };
-            const $cursor = samplesStart + Math.round((cursor.x - yAxisFromLeft) / xWidthPerSample);
+            const relativeCursorX = cursor.x - yAxisFromLeft;
             statsToDraw.values = [];
-            statsToDraw.x = ($cursor - samplesStart) * xWidthPerSample + yAxisFromLeft;
-            statsToDraw.xLabel = indexToFreq($cursor, fftBins, drawOptions.sampleRate).toFixed(0);
-            const $j = wrap($cursor, startOfBins, dataPtsPerChannel);
+            // "j" as above - the index of the sample - re-derived from where the cursor is
+            const j = samplesStart + Math.round((cursor.x - yAxisFromLeft) / xWidthPerSample);
+            if (logBase) {
+                const { interPowerFactor } = xLogMode.getPowerSteps(sampleRate);
+                const pixelsPerPower = xWidth * interPowerFactor;
+                const freq = logBase ** (relativeCursorX / pixelsPerPower);
+                // We don't have to fudge because we get a pretty accurate frequency from x
+                statsToDraw.x = cursor.x;
+                statsToDraw.xLabel = freq.toFixed(0);
+            } else {
+                // Fudge draw point a bit to take into account rounding
+                statsToDraw.x = (j - samplesStart) * xWidthPerSample + yAxisFromLeft;
+                statsToDraw.xLabel = indexToFreq(j, fftBins, drawOptions.sampleRate).toFixed(0);
+            }
+            const $j = wrap(j, startOfBins, dataPtsPerChannel);
             for (let i = 0; i < f.length; i++) {
                 const samp = f[i][$j];
                 if (typeof samp === "number") statsToDraw.values.push(samp);
@@ -552,7 +601,8 @@ export class StaticScope {
         $zerox: number,
         yFactor: number,
         d: TDrawOptions,
-        mode: EScopeMode
+        mode: EScopeMode,
+        xLogMode?: TXLogMode
     ) {
         canvas.save();
         canvas.setLineDash([]);
@@ -563,8 +613,7 @@ export class StaticScope {
             bufferSize, // buffer size
             fftSize, // fft block size
             fftOverlap, // fft overlap
-            sampleRate, // sample rate
-            xLogMode
+            sampleRate // sample rate
         } = d;
 
         // Frequency domain if drawing a Spectro-thing
@@ -612,33 +661,30 @@ export class StaticScope {
         // Change to Feint green X marker lines
         canvas.strokeStyle = bufferStrokeStyle;
 
-        if (xLogMode) {
-            const $xLogMode = xLogMode === 2 ? 2 : 10;
-            const logFunc = $xLogMode === 2 ? Math.log2 : Math.log10;
-            // We have evenly spaced X guidelines at 1, 10, 100, 1000, 10000, 100000
-            // i.e. the X space is divided into 7.
+        if (xLogMode && xLogMode.logBase) {
             const xWidth = canvasWidth - yAxisFromLeft;
-            const markers = [];
-            for (let i = 1; i < 100000; i *= $xLogMode) {
-                markers.push(i.toFixed());
-            }
-            const coordSpace = xWidth / (markers.length + 1);
-            for (let c = 0; c < markers.length; ++c) {
-                canvas.strokeStyle = c > 0 ? bufferStrokeStyle : "white";
-                const x = (c * coordSpace) + yAxisFromLeft;
+
+            const { powers, suffixSteps, interPowerFactor } = xLogMode.getPowerSteps(sampleRate);
+
+            canvas.strokeStyle = "white";
+            const endSuffixLines = suffixSteps + 2;
+            const interPowerSpace = xWidth * interPowerFactor;
+            for (let c = 0; c <= powers; ++c) {
+                // The tagged line for this frequency
+                const tagFreq = xLogMode.logBase ** c;
+                const x = xLogMode.logFunc(tagFreq) * interPowerSpace + yAxisFromLeft;
                 canvas.beginPath();
                 canvas.moveTo(x, 0);
                 canvas.lineTo(x, canvasHeight - xAxisFromBottom);
                 canvas.stroke();
-                canvas.fillText(markers[c], Math.min(x, canvasWidth - 20), canvasHeight - 10);
+                canvas.fillText(tagFreq.toFixed(), Math.min(x, canvasWidth - 20), canvasHeight - 10);
 
                 canvas.strokeStyle = bufferStrokeStyle;
-                // Now lines at 2-9, and
-                const x1 = Math.min(((c + 1) * coordSpace) + yAxisFromLeft, canvasWidth);
-                const xyWidth = x1 - x;
-                for (let t = 2; t < xLogMode; ++t) {
+                // Now lines in between
+                const stopFreq = c === powers ? endSuffixLines * tagFreq : xLogMode.logBase ** (c + 1);
+                for (let lineFreq = tagFreq + tagFreq; lineFreq < stopFreq; lineFreq += tagFreq) {
                     canvas.beginPath();
-                    const lineX = (x + (logFunc(t) * xyWidth));
+                    const lineX = xLogMode.logFunc(lineFreq) * interPowerSpace + yAxisFromLeft;
                     canvas.moveTo(lineX, 0);
                     canvas.lineTo(lineX, canvasHeight - xAxisFromBottom);
                     canvas.stroke();
