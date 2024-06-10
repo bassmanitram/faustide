@@ -433,14 +433,18 @@ export class StaticScope {
                     }
 
                     const y = channelHeight * (channel + 1 - Math.min(1, Math.max(0, maxInStep / 100 + 1)));
-                    if (nextX === 1) canvas.moveTo(x, y);
-                    else canvas.lineTo(x, y);
+                    if (y > 1) {
+                        canvas.beginPath();
+                        canvas.moveTo(x, y);
+                        canvas.lineTo(x, y - 1);
+                        canvas.stroke();
+                    }
                     nextX = x + xWidthPerSample;
                     maxInStep = 0;
                 }
-                canvas.lineTo(canvasWidth, channelHeight * (channel + 1));
-                canvas.lineTo(yAxisFromLeft, channelHeight * (channel + 1));
-                canvas.stroke();
+                // canvas.lineTo(canvasWidth, channelHeight * (channel + 1));
+                // canvas.lineTo(yAxisFromLeft, channelHeight * (channel + 1));
+                // canvas.stroke();
             } else {
                 canvas.fillStyle = channels === 1 ? "white" : `hsl(${channel * 60}, 100%, 85%)`;
                 for (let j = samplesStart; j < samplesEnd; j++) {
