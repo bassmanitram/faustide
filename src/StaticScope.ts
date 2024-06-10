@@ -29,19 +29,19 @@ export class TXLogMode {
     }
     get logBase() { return this._logBase; }
     get logFunc() { return this._logFunc; }
-    getPowerSteps(sampleRate: number): { powers: number; suffixSteps: number; interPowerFactor: number } {
+    getIncrements(sampleRate: number): { increments: number; suffixSteps: number; interIncrementFactor: number } {
         const nyquist = sampleRate / 2;
-        let powers = 0;
-        for (; this.logBase ** powers < nyquist; powers++);
-        powers -= 1;
+        let increments = 0;
+        for (; this.logBase ** increments < nyquist; increments++);
+        increments -= 1;
         let suffixSteps = 1;
-        const lastPower = this.logBase ** powers;
+        const lastPower = this.logBase ** increments;
         for (; lastPower + (lastPower * suffixSteps) < nyquist; suffixSteps++);
-        const interPowerFactor = 1 / (powers + this.logFunc(suffixSteps + 2));
+        const interIncrementFactor = 1 / (increments + this.logFunc(suffixSteps + 2));
         return {
-            powers,
+            increments,
             suffixSteps,
-            interPowerFactor
+            interIncrementFactor
         };
     }
 }
@@ -413,8 +413,7 @@ export class StaticScope {
             canvas.beginPath();
             canvas.strokeStyle = channels === 1 ? "white" : `hsl(${channel * 60}, 100%, 85%)`;
             if (logBase) {
-                const { interPowerFactor } = xLogMode.getPowerSteps(sampleRate);
-                const pixelsPerPower = xWidth * interPowerFactor;
+                const pixelsPerIncrement = xWidth * xLogMode.getIncrements(sampleRate).interIncrementFactor;
 
                 const lastSample = samplesEnd - samplesStart - 1;
                 let nextX = 0;
@@ -422,7 +421,7 @@ export class StaticScope {
                     const relativeIndex = j - samplesStart;
 
                     const frequency = indexToFreq(j, fftBins, drawOptions.sampleRate);
-                    const x = logFunc(frequency) * pixelsPerPower + yAxisFromLeft;
+                    const x = logFunc(frequency) * pixelsPerIncrement + yAxisFromLeft;
 
                     const sample = f[channel][wrap(j, startOfBins, dataPtsPerChannel)];
                     if (maxInStep === 0) maxInStep = sample;
@@ -479,9 +478,8 @@ export class StaticScope {
             // "j" as above - the index of the sample - re-derived from where the cursor is
             const j = samplesStart + Math.round((cursor.x - yAxisFromLeft) / xWidthPerSample);
             if (logBase) {
-                const { interPowerFactor } = xLogMode.getPowerSteps(sampleRate);
-                const pixelsPerPower = xWidth * interPowerFactor;
-                const freq = logBase ** (relativeCursorX / pixelsPerPower);
+                const pixelsPerIncrement = xWidth * xLogMode.getIncrements(sampleRate).interIncrementFactor;
+                const freq = logBase ** (relativeCursorX / pixelsPerIncrement);
                 // We don't have to fudge because we get a pretty accurate frequency from x
                 statsToDraw.x = cursor.x;
                 statsToDraw.xLabel = freq.toFixed(0);
@@ -668,15 +666,15 @@ export class StaticScope {
         if (xLogMode && xLogMode.logBase) {
             const xWidth = canvasWidth - yAxisFromLeft;
 
-            const { powers, suffixSteps, interPowerFactor } = xLogMode.getPowerSteps(sampleRate);
+            const { increments, suffixSteps, interIncrementFactor } = xLogMode.getIncrements(sampleRate);
 
             canvas.strokeStyle = "white";
             const endSuffixLines = suffixSteps + 2;
-            const interPowerSpace = xWidth * interPowerFactor;
-            for (let c = 0; c <= powers; ++c) {
+            const pixelsPerIncrement = xWidth * interIncrementFactor;
+            for (let c = 0; c <= increments; ++c) {
                 // The tagged line for this frequency
                 const tagFreq = xLogMode.logBase ** c;
-                const x = xLogMode.logFunc(tagFreq) * interPowerSpace + yAxisFromLeft;
+                const x = xLogMode.logFunc(tagFreq) * pixelsPerIncrement + yAxisFromLeft;
                 canvas.beginPath();
                 canvas.moveTo(x, 0);
                 canvas.lineTo(x, canvasHeight - xAxisFromBottom);
@@ -685,10 +683,10 @@ export class StaticScope {
 
                 canvas.strokeStyle = bufferStrokeStyle;
                 // Now lines in between
-                const stopFreq = c === powers ? endSuffixLines * tagFreq : xLogMode.logBase ** (c + 1);
+                const stopFreq = c === increments ? endSuffixLines * tagFreq : xLogMode.logBase ** (c + 1);
                 for (let lineFreq = tagFreq + tagFreq; lineFreq < stopFreq; lineFreq += tagFreq) {
                     canvas.beginPath();
-                    const lineX = xLogMode.logFunc(lineFreq) * interPowerSpace + yAxisFromLeft;
+                    const lineX = xLogMode.logFunc(lineFreq) * pixelsPerIncrement + yAxisFromLeft;
                     canvas.moveTo(lineX, 0);
                     canvas.lineTo(lineX, canvasHeight - xAxisFromBottom);
                     canvas.stroke();
