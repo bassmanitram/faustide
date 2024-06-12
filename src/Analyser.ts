@@ -1,5 +1,5 @@
 import { FFTR } from "kissfft-js";
-import { TDrawOptions, TXLogMode } from "./StaticScope";
+import { SpectroscopeStyle, TDrawOptions, TXLogMode } from "./StaticScope";
 import { sliceWrap, getFrequencyDomainData, setWrap, estimateFreq } from "./utils";
 
 /**
@@ -80,6 +80,7 @@ export class Analyser {
     freqEstimated: number;
 
     xLogMode: TXLogMode;
+    scopeStyle: SpectroscopeStyle;
 
     constructor(buffers?: number, drawMode?: "offline" | "continuous" | "onevent" | "manual", drawHandler?: (options: TDrawOptions) => any) {
         this.buffers = buffers || 0;
@@ -88,7 +89,8 @@ export class Analyser {
         this._fftOverlap = 2;
         this.capturing = -1;
         this.fftSize = 256;
-        this.xLogMode = new TXLogMode(0);
+        this.xLogMode = new TXLogMode();
+        this.scopeStyle = new SpectroscopeStyle();
     }
     initCache(bufferSize: number, channels: number) {
         const buffers = this.drawMode === "offline" ? 1 : this.buffers;
@@ -133,18 +135,18 @@ export class Analyser {
         } else this.draw();
     }
     draw() {
-        const { t, f, e, drawHandler, drawMode, fftSize, fftOverlap, freqEstimated, sampleRate, xLogMode } = this;
+        const { t, f, e, drawHandler, drawMode, fftSize, fftOverlap, freqEstimated, sampleRate, xLogMode, scopeStyle } = this;
         if (!drawHandler) return;
         if (!t || !t.length) return;
         if (drawMode === "offline") {
-            drawHandler({ $: 0, $buffer: 0, bufferSize: t[0].length, drawMode, fftSize, fftOverlap, freqEstimated, sampleRate, t, f, e, xLogMode });
+            drawHandler({ $: 0, $buffer: 0, bufferSize: t[0].length, drawMode, fftSize, fftOverlap, freqEstimated, sampleRate, t, f, e, xLogMode, scopeStyle });
             return;
         }
         const bufferSize = this.t[0].length / this.buffers;
         const $ = (this.$ + bufferSize) % this.t[0].length;
         const $buffer = this.$buffer + 1 - this.buffers;
-        if (this.drawMode === "continuous" || this.capturing > 0) this.drawHandler({ $, $buffer, bufferSize, drawMode, fftSize, fftOverlap, freqEstimated, sampleRate, t, f, e, xLogMode });
-        else this.drawHandler({ $, $buffer, bufferSize, drawMode, fftSize, fftOverlap, freqEstimated, sampleRate, t: this.t.map(a => a.slice()), f: this.f.map(a => a.slice()), e: this.e.slice(), xLogMode });
+        if (this.drawMode === "continuous" || this.capturing > 0) this.drawHandler({ $, $buffer, bufferSize, drawMode, fftSize, fftOverlap, freqEstimated, sampleRate, t, f, e, xLogMode, scopeStyle });
+        else this.drawHandler({ $, $buffer, bufferSize, drawMode, fftSize, fftOverlap, freqEstimated, sampleRate, t: this.t.map(a => a.slice()), f: this.f.map(a => a.slice()), e: this.e.slice(), xLogMode, scopeStyle });
     }
     /**
      * The function property can be overwritten to get the sampleRate differently.

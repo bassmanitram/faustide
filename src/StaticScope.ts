@@ -8,6 +8,14 @@ enum EScopeMode {
     Spectroscope = 3,
     Spectrogram = 4
 }
+
+enum EScopeStyle {
+    Dots = 0,
+    Lines = 1,
+    Outline = 2,
+    Filled = 3
+}
+
 type TOptions = {
     container: HTMLDivElement;
     type?: EScopeMode;
@@ -20,10 +28,90 @@ type TStatsToDraw = {
     values: number[];
 };
 
+class SpectroscopeStyleContext {
+    _style: SpectroscopeStyle;
+    _canvas: CanvasRenderingContext2D;
+    _minX: number;
+    _maxX: number;
+    _minY: number;
+    _maxY: number;
+    _started = false;
+    constructor(style: SpectroscopeStyle,
+        canvas: CanvasRenderingContext2D,
+        minX: number = 0,
+        maxX: number = -1,
+        minY: number = 0,
+        maxY: number = -1) {
+        this._canvas = canvas;
+        this._style = style;
+        this._minX = minX;
+        this._maxX = maxX > -1 ? maxX : canvas.canvas.width;
+        this._minY = minY;
+        this._maxY = maxY > -1 ? maxY : canvas.canvas.height;
+
+        if (this._style._style > 1) {
+            this._canvas.beginPath();
+        }
+    }
+
+    draw(x: number, y: number) {
+        if (x >= this._minX && x <= this._maxX
+        && y >= this._minY && y <= this._maxY) {
+            const style = this._style._style;
+            const canvas = this._canvas;
+            if (style < 2) {
+                canvas.beginPath();
+                canvas.moveTo(x, y);
+                canvas.lineTo(x, style === 0 ? (y < this._maxY ? y + 1 : y) : this._maxY);
+                canvas.stroke();
+            } else {
+                if (this._started) {
+                    canvas.lineTo(x, y);
+                } else {
+                    canvas.moveTo(x, y);
+                    this._started = true;
+                }
+            }
+        }
+    }
+
+    end() {
+        if (this._style._style > 1) {
+            this._canvas.lineTo(this._maxX, this._maxY);
+            if (this._style._style === EScopeStyle.Outline) {
+                this._canvas.stroke();
+            } else if (this._style._style === EScopeStyle.Filled) {
+                this._canvas.lineTo(this._minX, this._maxY);
+                this._canvas.closePath();
+                this._canvas.fill();
+            }
+        }
+    }
+}
+
+export class SpectroscopeStyle {
+    _style: EScopeStyle
+    constructor(style: EScopeStyle = EScopeStyle.Dots) {
+        this._style = style;
+    }
+
+    get style() {
+        return this._style;
+    }
+
+    createStyleContext(canvas: CanvasRenderingContext2D,
+        minX: number = 0,
+        maxX: number = -1,
+        minY: number = 0,
+        maxY: number = -1) {
+        return new SpectroscopeStyleContext(this, canvas, minX, maxX, minY, maxY);
+    }
+}
+
 export class TXLogMode {
     _logBase: 0 | 2 | 10;
     _logFunc?: any;
-    constructor(base: 0 | 2 | 10) {
+    constructor(base: 0 | 2 | 10 = 0) {
         this._logBase = base;
         if (base) this._logFunc = base === 2 ? Math.log2 : Math.log10;
     }
@@ -59,6 +147,7 @@ export type TDrawOptions = {
     freqEstimated?: number;
     sampleRate?: number;
     xLogMode?: TXLogMode;
+    scopeStyle?: SpectroscopeStyle;
 }
 
 export class StaticScope {
@@ -79,7 +168,7 @@ export class StaticScope {
     private _zoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
     private _vzoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
     private _zoomOffset = { oscilloscope: 0, spectroscope: 0, spectrogram: 0 };
-    data: TDrawOptions = { drawMode: "manual", t: undefined, $: 0, $buffer: 0, bufferSize: 128, fftSize: 256, fftOverlap: 2, xLogMode: new TXLogMode(0) };
+    data: TDrawOptions = { drawMode: "manual", t: undefined, $: 0, $buffer: 0, bufferSize: 128, fftSize: 256, fftOverlap: 2, xLogMode: new TXLogMode(), scopeStyle: new SpectroscopeStyle() };
     cursor: { x: number; y: number };
     dragging: boolean = false;
     spectTempCtx: CanvasRenderingContext2D;
@@ -357,6 +446,7 @@ export class StaticScope {
             fftSize, // fft block size (2**n where n can be 8 thru 16)
             fftOverlap, // fft overlap (2**m where m can be 0 thru 3)
             xLogMode, // Whether using linear or logarithmic scaling on the X axis
+            scopeStyle,
             sampleRate
         } = drawOptions;
 
@@ -410,8 +500,10 @@ export class StaticScope {
         for (let channel = 0; channel < channels; channel++) {
             let maxInStep = 0;
 
-            canvas.beginPath();
+            const styleContext = scopeStyle.createStyleContext(canvas, yAxisFromLeft, canvasWidth, channelHeight * channel, channelHeight * (channel + 1));
             canvas.strokeStyle = channels === 1 ? "white" : `hsl(${channel * 60}, 100%, 85%)`;
+            canvas.fillStyle = channels === 1 ? "white" : `hsl(${channel * 60}, 100%, 85%)`;
+
             if (logBase) {
                 const pixelsPerIncrement = xWidth * xLogMode.getIncrements(sampleRate).interIncrementFactor;
 
@@ -419,11 +511,11 @@ export class StaticScope {
                 let nextX = 0;
                 for (let j = samplesStart; j < samplesEnd; j++) {
                     const relativeIndex = j - samplesStart;
+                    const sample = f[channel][wrap(j, startOfBins, dataPtsPerChannel)];
 
                     const frequency = indexToFreq(j, fftBins, drawOptions.sampleRate);
                     const x = logFunc(frequency) * pixelsPerIncrement + yAxisFromLeft;
 
-                    const sample = f[channel][wrap(j, startOfBins, dataPtsPerChannel)];
                     if (maxInStep === 0) maxInStep = sample;
 
                     if (x < nextX && relativeIndex < lastSample) {
@@ -432,24 +524,15 @@ export class StaticScope {
                     }
 
                     const y = channelHeight * (channel + 1 - Math.min(1, Math.max(0, maxInStep / 100 + 1)));
-                    if (y > 1) {
-                        canvas.beginPath();
-                        canvas.moveTo(x, y);
-                        canvas.lineTo(x, y - 1);
-                        canvas.stroke();
-                    }
-                    nextX = x + xWidthPerSample;
+                    styleContext.draw(nextX, y);
+                    nextX = Math.ceil(x);
                     maxInStep = 0;
                 }
-                // canvas.lineTo(canvasWidth, channelHeight * (channel + 1));
-                // canvas.lineTo(yAxisFromLeft, channelHeight * (channel + 1));
-                // canvas.stroke();
             } else {
-                canvas.fillStyle = channels === 1 ? "white" : `hsl(${channel * 60}, 100%, 85%)`;
                 for (let j = samplesStart; j < samplesEnd; j++) {
                     const relativeIndex = j - samplesStart;
-                    const $j = wrap(j, startOfBins, dataPtsPerChannel);
-                    const sample = f[channel][$j];
+                    const sample = f[channel][wrap(j, startOfBins, dataPtsPerChannel)];
+
                     const $step = relativeIndex % samplesPerXStep;
                     // First sample in step
                     if ($step === 0) maxInStep = sample;
@@ -461,14 +544,10 @@ export class StaticScope {
                     }
                     const x = relativeIndex * xWidthPerSample + yAxisFromLeft;
                     const y = channelHeight * (channel + 1 - Math.min(1, Math.max(0, maxInStep / 100 + 1)));
-                    if (j === samplesStart) canvas.moveTo(x, y);
-                    else canvas.lineTo(x, y);
+                    styleContext.draw(x, y);
                 }
-                canvas.lineTo(canvasWidth, channelHeight * (channel + 1));
-                canvas.lineTo(yAxisFromLeft, channelHeight * (channel + 1));
-                canvas.closePath();
-                canvas.fill();
             }
+            styleContext.end();
         }
         eventsToDraw.forEach(params => this.drawEvent(canvas, canvasWidth, canvasHeight, ...params));
         if (cursor && cursor.x > yAxisFromLeft && cursor.y < canvasHeight - xAxisFromBottom) {
