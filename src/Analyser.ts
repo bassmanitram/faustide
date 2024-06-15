@@ -1,5 +1,5 @@
 import { FFTR } from "kissfft-js";
-import { SpectroscopeStyle, TDrawOptions, TXLogMode } from "./StaticScope";
+import { SpectroscopeStyle, TDrawOptions, XAxisLinear, XAxisScale } from "./StaticScope";
 import { sliceWrap, getFrequencyDomainData, setWrap, estimateFreq } from "./utils";
 
 /**
@@ -79,7 +79,7 @@ export class Analyser {
     drawHandler: (options: TDrawOptions) => any;
     freqEstimated: number;
 
-    xLogMode: TXLogMode;
+    xLogMode: XAxisScale;
     scopeStyle: SpectroscopeStyle;
 
     constructor(buffers?: number, drawMode?: "offline" | "continuous" | "onevent" | "manual", drawHandler?: (options: TDrawOptions) => any) {
@@ -89,7 +89,7 @@ export class Analyser {
         this._fftOverlap = 2;
         this.capturing = -1;
         this.fftSize = 256;
-        this.xLogMode = new TXLogMode();
+        this.xLogMode = new XAxisLinear();
         this.scopeStyle = new SpectroscopeStyle();
     }
     initCache(bufferSize: number, channels: number) {

@@ -26,7 +26,7 @@ import "bootstrap/js/dist/modal";
 import "@fortawesome/fontawesome-free/css/all.css";
 import "bootstrap/scss/bootstrap.scss";
 import "./index.scss";
-import { SpectroscopeStyle, StaticScope, TXLogMode } from "./StaticScope";
+import { SpectroscopeStyle, StaticScope, XAxisScale } from "./StaticScope";
 import { Analyser } from "./Analyser";
 import { FileManager } from "./FileManager";
 import { GainUI, createMeterNode, MeterNode } from "./MeterNode";
@@ -764,7 +764,7 @@ $(async () => {
         saveEditorParams();
     });
     $<HTMLInputElement>("#select-x-scaling").on("change", (e) => {
-        uiEnv.analyser.xLogMode = new TXLogMode(+e.currentTarget.value as 0 | 2 | 10);
+        uiEnv.analyser.xLogMode = XAxisScale.createXAxisScale(+e.currentTarget.value as 0 | 2 | 10);
         saveEditorParams();
     });
     $<HTMLInputElement>("#select-scope-style").on("change", (e) => {

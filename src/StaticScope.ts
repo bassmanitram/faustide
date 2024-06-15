@@ -108,19 +108,15 @@ export class SpectroscopeStyle {
     }
 }
 
-export class TXLogMode {
-    _logBase: 0 | 2 | 10;
-    _logFunc?: any;
-    constructor(base: 0 | 2 | 10 = 0) {
-        this._logBase = base;
-        if (base) this._logFunc = base === 2 ? Math.log2 : Math.log10;
-    }
+export abstract class XAxisScale {
+    _logBase: number;
+    _logFunc: (x: number) => number;
     get logBase() { return this._logBase; }
     get logFunc() { return this._logFunc; }
     getIncrements(sampleRate: number): { increments: number; suffixSteps: number; interIncrementFactor: number } {
         const nyquist = sampleRate / 2;
         let increments = 0;
-        for (; this.logBase ** increments < nyquist; increments++);
+        for (; this._logBase ** increments < nyquist; increments++);
         increments -= 1;
         let suffixSteps = 1;
         const lastPower = this.logBase ** increments;
@@ -130,6 +126,48 @@ export class TXLogMode {
             increments,
             suffixSteps,
             interIncrementFactor
+        };
+    }
+
+    static createXAxisScale(logBase: 0 | 2 | 10): XAxisScale {
+        if (logBase === 0) return new XAxisLinear();
+        if (logBase === 2) return new XAxisLog2();
+        if (logBase === 10) return new XAxisLog10();
+        throw new Error(`Invalid XAxisLogMode ${logBase}`);
+    }
+}
+
+export class XAxisLog10 extends XAxisScale {
+    constructor() {
+        super();
+        this._logBase = 10;
+        this._logFunc = Math.log10;
+    }
+}
+
+export class XAxisLog2 extends XAxisScale {
+    constructor() {
+        super();
+        this._logBase = 2;
+        this._logFunc = Math.log2;
+    }
+}
+
+export class XAxisLinear extends XAxisScale {
+    ident(x: number): number {
+        return x;
+    }
+    constructor() {
+        super();
+        this._logBase = 0;
+        this._logFunc = this.ident;
+    }
+    getIncrements(sampleRate: number): { increments: number; suffixSteps: number; interIncrementFactor: number } {
+        const nyquist = sampleRate / 2;
+        return {
+            increments: Math.floor(nyquist),
+            suffixSteps: 2,
+            interIncrementFactor: 1 / nyquist
         };
     }
 }
@@ -146,7 +184,7 @@ export type TDrawOptions = {
     fftOverlap: 1 | 2 | 4 | 8;
     freqEstimated?: number;
     sampleRate?: number;
-    xLogMode?: TXLogMode;
+    xLogMode?: XAxisScale;
     scopeStyle?: SpectroscopeStyle;
 }
 
@@ -168,7 +206,7 @@ export class StaticScope {
     private _zoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
     private _vzoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
     private _zoomOffset = { oscilloscope: 0, spectroscope: 0, spectrogram: 0 };
-    data: TDrawOptions = { drawMode: "manual", t: undefined, $: 0, $buffer: 0, bufferSize: 128, fftSize: 256, fftOverlap: 2, xLogMode: new TXLogMode(), scopeStyle: new SpectroscopeStyle() };
+    data: TDrawOptions = { drawMode: "manual", t: undefined, $: 0, $buffer: 0, bufferSize: 128, fftSize: 256, fftOverlap: 2, xLogMode: new XAxisLinear(), scopeStyle: new SpectroscopeStyle() };
     cursor: { x: number; y: number };
     dragging: boolean = false;
     spectTempCtx: CanvasRenderingContext2D;
@@ -197,7 +235,7 @@ export class StaticScope {
         eDown.stopPropagation();
         this.dragging = true;
         this.canvas.style.cursor = "grab";
-        const origZoom = this.zoom;
+        const origZoom = this.zoomFactor;
         const origOffset = this.zoomOffset;
         let prevX = eDown instanceof MouseEvent ? eDown.pageX : eDown.touches[0].pageX;
         // let prevY = eDown instanceof MouseEvent ? eDown.pageY : eDown.touches[0].pageY;
@@ -209,10 +247,10 @@ export class StaticScope {
             prevX = x;
             // prevY = y;
             // const multiplier = 1 / 1.015 ** dY;
-            const offset = -dX / this.zoom / this.canvas.width;
+            const offset = -dX / this.zoomFactor / this.canvas.width;
             // if (multiplier !== 1) this.zoom *= multiplier;
             if (offset !== 0) this.zoomOffset += offset;
-            if (this.zoom !== origZoom || this.zoomOffset !== origOffset) this.draw();
+            if (this.zoomFactor !== origZoom || this.zoomOffset !== origOffset) this.draw();
         };
         const handleMouseUp = () => {
             this.dragging = false;
@@ -431,8 +469,8 @@ export class StaticScope {
         canvasWidth: number, // width of the canvas
         canvasHeight: number, // height of the canvas
         drawOptions: TDrawOptions, // Current draw options
-        zoom: number, // Current zoom factor
-        zoomOffset: number, // Zoom offset
+        zoomFactor: number, // Current zoom factor (i.e. this * no-zoom spacing)
+        zoomXOffsetFactor: number, // Zoom offset
         cursor?: { x: number; y: number } // Optional cursor position
     ) {
         // Fill the background
@@ -456,7 +494,11 @@ export class StaticScope {
         const channels = f.length;
 
         // The number of frequencies we have data for
-        const fftBins = fftSize / 2;
+        const frequencyCount = fftSize / 2;
+
+        // The start of the bins we are dealing with
+        let startOfBins = $ * fftOverlap / 2;
+        startOfBins -= startOfBins % frequencyCount;
 
         // l is the length data
         const dataPtsPerChannel = f[0].length;
@@ -472,9 +514,11 @@ export class StaticScope {
             logFunc
         } = xLogMode;
 
-        // Derive the start and end indexes we are REALLY dealing with
-        const samplesStart = dataPtsPerChannel - fftBins + Math.round(fftBins * zoomOffset);
-        const samplesEnd = dataPtsPerChannel - fftBins + Math.round(fftBins / zoom + fftBins * zoomOffset);
+        // Derive the start and end indexes we are REALLY dealing with after taking zoom into account
+        // We take the last set of samples (one for each frequency) and then adjust that based on the
+        // the visible window and the start-point in that window.
+        const samplesStart = dataPtsPerChannel - frequencyCount + Math.round(frequencyCount * zoomXOffsetFactor);
+        const samplesEnd = dataPtsPerChannel - frequencyCount + Math.round(frequencyCount / zoomFactor + frequencyCount * zoomXOffsetFactor);
         const sampleCount = samplesEnd - samplesStart - 1;
 
         // get the "events to draw"
@@ -491,9 +535,6 @@ export class StaticScope {
             xLogMode
         );
 
-        let startOfBins = $ * fftOverlap / 2;
-        startOfBins -= startOfBins % fftBins;
-
         const xWidthPerSample = xWidth / sampleCount;
         const samplesPerXStep = Math.max(1, Math.round(1 / xWidthPerSample));
         // For each channel...
@@ -504,16 +545,21 @@ export class StaticScope {
             canvas.strokeStyle = channels === 1 ? "white" : `hsl(${channel * 60}, 100%, 85%)`;
             canvas.fillStyle = channels === 1 ? "white" : `hsl(${channel * 60}, 100%, 85%)`;
 
-            if (logBase) {
-                const pixelsPerIncrement = xWidth * xLogMode.getIncrements(sampleRate).interIncrementFactor;
-
+            if (logBase >= 0) {
                 const lastSample = samplesEnd - samplesStart - 1;
+                const firstFrequency = indexToFreq(samplesStart, frequencyCount, drawOptions.sampleRate);
+                const lastFrequency = indexToFreq(lastSample, frequencyCount, drawOptions.sampleRate);
+                //
+                // THIS IS THE FUNCTION THAT NEEDS TO CHANGE TO TAKE INTO ACCOUNT ZOOM
+                //
+                const pixelsPerIncrement = xWidth * xLogMode.getIncrements(sampleRate).interIncrementFactor * zoomFactor;
+
                 let nextX = 0;
                 for (let j = samplesStart; j < samplesEnd; j++) {
                     const relativeIndex = j - samplesStart;
                     const sample = f[channel][wrap(j, startOfBins, dataPtsPerChannel)];
 
-                    const frequency = indexToFreq(j, fftBins, drawOptions.sampleRate);
+                    const frequency = indexToFreq(j, frequencyCount, drawOptions.sampleRate);
                     const x = logFunc(frequency) * pixelsPerIncrement + yAxisFromLeft;
 
                     if (maxInStep === 0) maxInStep = sample;
@@ -557,7 +603,7 @@ export class StaticScope {
             // "j" as above - the index of the sample - re-derived from where the cursor is
             const j = samplesStart + Math.round((cursor.x - yAxisFromLeft) / xWidthPerSample);
             if (logBase) {
-                const pixelsPerIncrement = xWidth * xLogMode.getIncrements(sampleRate).interIncrementFactor;
+                const pixelsPerIncrement = xWidth * xLogMode.getIncrements(sampleRate).interIncrementFactor * zoomFactor;
                 const freq = logBase ** (relativeCursorX / pixelsPerIncrement);
                 // We don't have to fudge because we get a pretty accurate frequency from x
                 statsToDraw.x = cursor.x;
@@ -565,7 +611,7 @@ export class StaticScope {
             } else {
                 // Fudge draw point a bit to take into account rounding
                 statsToDraw.x = (j - samplesStart) * xWidthPerSample + yAxisFromLeft;
-                statsToDraw.xLabel = indexToFreq(j, fftBins, drawOptions.sampleRate).toFixed(0);
+                statsToDraw.xLabel = indexToFreq(j, frequencyCount, drawOptions.sampleRate).toFixed(0);
             }
             const $j = wrap(j, startOfBins, dataPtsPerChannel);
             for (let i = 0; i < f.length; i++) {
@@ -683,7 +729,7 @@ export class StaticScope {
         yFactor: number,
         d: TDrawOptions,
         mode: EScopeMode,
-        xLogMode?: TXLogMode
+        xLogMode?: XAxisScale
     ) {
         canvas.save();
         canvas.setLineDash([]);
@@ -782,7 +828,7 @@ export class StaticScope {
                 canvas.moveTo(x, 0);
                 canvas.lineTo(x, canvasHeight - xAxisFromBottom);
                 canvas.stroke();
-                if (mode === EScopeMode.Spectrogram) { // TODO: Create 10**n labels
+                if (mode === EScopeMode.Spectrogram) {
                     if ($fft % 1 === 0) canvas.fillText($fft.toFixed(), Math.min(x, canvasWidth - 20), canvasHeight - 10);
                 } else if (mode === EScopeMode.Spectroscope) {
                     canvas.fillText((($fft % 1) * sampleRate / 2).toFixed(), Math.min(x, canvasWidth - 20), canvasHeight - 10);
@@ -1108,21 +1154,21 @@ export class StaticScope {
                 if (multiplier !== 1) this.vzoom *= 1 / multiplier;
                 this.draw();
             } else {
-                if (multiplier !== 1) this.zoom *= multiplier;
+                if (multiplier !== 1) this.zoomFactor *= multiplier;
                 if (e.deltaX !== 0) this.zoomOffset += (e.deltaX > 0 ? 1 : -1) * 0.1;
                 this.handleMouseMove(e);
             }
         });
         this.btnZoomOut.addEventListener("click", () => {
-            this.zoom /= 1.5;
+            this.zoomFactor /= 1.5;
             this.draw();
         });
         this.btnZoom.addEventListener("click", () => {
-            this.zoom = 1;
+            this.zoomFactor = 1;
             this.draw();
         });
         this.btnZoomIn.addEventListener("click", () => {
-            this.zoom *= 1.5;
+            this.zoomFactor *= 1.5;
             this.draw();
         });
         this.btnDownload.addEventListener("click", () => {
@@ -1205,10 +1251,10 @@ export class StaticScope {
         if (this.canvas.width !== w) this.canvas.width = w;
         if (this.canvas.height !== h) this.canvas.height = h;
         if (this.mode === EScopeMode.Data) StaticScope.fillDivData(this.divData, this.data);
-        else if (this.mode === EScopeMode.Interleaved) StaticScope.drawInterleaved(this.ctx, w, h, this.data, this.zoom, this.zoomOffset, this.vzoom, this.cursor);
-        else if (this.mode === EScopeMode.Oscilloscope) StaticScope.drawOscilloscope(this.ctx, w, h, this.data, this.zoom, this.zoomOffset, this.vzoom, this.cursor);
-        else if (this.mode === EScopeMode.Spectroscope) StaticScope.drawSpectroscope(this.ctx, w, h, this.data, this.zoom, this.zoomOffset, this.cursor);
-        else if (this.mode === EScopeMode.Spectrogram) StaticScope.drawSpectrogram(this.ctx, this.spectTempCtx, w, h, this.data, this.zoom, this.zoomOffset, this.cursor);
+        else if (this.mode === EScopeMode.Interleaved) StaticScope.drawInterleaved(this.ctx, w, h, this.data, this.zoomFactor, this.zoomOffset, this.vzoom, this.cursor);
+        else if (this.mode === EScopeMode.Oscilloscope) StaticScope.drawOscilloscope(this.ctx, w, h, this.data, this.zoomFactor, this.zoomOffset, this.vzoom, this.cursor);
+        else if (this.mode === EScopeMode.Spectroscope) StaticScope.drawSpectroscope(this.ctx, w, h, this.data, this.zoomFactor, this.zoomOffset, this.cursor);
+        else if (this.mode === EScopeMode.Spectrogram) StaticScope.drawSpectrogram(this.ctx, this.spectTempCtx, w, h, this.data, this.zoomFactor, this.zoomOffset, this.cursor);
         this.newDataArrived = false;
     };
     draw = (data?: TDrawOptions) => {
@@ -1219,7 +1265,7 @@ export class StaticScope {
         if (this.raf) return;
         this.raf = requestAnimationFrame(this.drawCallback);
     }
-    get zoomType() {
+    get zoomedScopeType() {
         return this.mode === EScopeMode.Spectroscope
             ? "spectroscope"
             : this.mode === EScopeMode.Spectrogram
@@ -1227,31 +1273,59 @@ export class StaticScope {
                 : "oscilloscope";
     }
     get vzoom() {
-        return this._vzoom[this.zoomType];
+        return this._vzoom[this.zoomedScopeType];
     }
     set vzoom(zoomIn) {
         const maxZoom = 16;
-        this._vzoom[this.zoomType] = Math.min(maxZoom, Math.max(1, zoomIn));
+        this._vzoom[this.zoomedScopeType] = Math.min(maxZoom, Math.max(1, zoomIn));
     }
-    get zoom() {
-        return this._zoom[this.zoomType];
+    get zoomFactor() {
+        return this._zoom[this.zoomedScopeType];
     }
-    set zoom(zoomIn) {
+
+    //
+    // A horrible abuse of setters and getters - but there ya go!
+    //
+    // Effectively this normalizes and sets both the zoom factor, AND
+    // the visible "window" into the zoomed X axis as a fraction of the
+    // whole X axis.
+    //
+    set zoomFactor(zoomIn) {
         const maxZoom = this.data && this.data.t && this.data.t[0] ? Math.max(16, this.mode === EScopeMode.Spectroscope ? 16 : this.data.t[0].length / (this.inFreqDomain ? this.data.fftSize / 2 : this.data.bufferSize)) : 16;
-        const w = this.canvas.width;
-        let cursorIn = 0.5;
-        const left = 50;
-        if (this.cursor) cursorIn = Math.max(0, this.cursor.x - left) / (w - left);
-        const cursor = this.zoomOffset + cursorIn / this.zoom;
-        this._zoom[this.zoomType] = Math.min(maxZoom, Math.max(1, zoomIn));
-        this.zoomOffset = cursor - cursorIn / this.zoom;
-        this.btnZoom.innerHTML = this.zoom.toFixed(1) + "x";
+        const yAxisFromLeft = 50; // Where the Y axis
+        const xAxisLength = this.canvas.width - yAxisFromLeft;
+        let cursorInXSpace = 0.5; // Default cursor position is at the center of the scope
+
+        // If we have a cursor, we figure out at what fraction of the scope X axis space the cursor is sitting
+        if (this.cursor) cursorInXSpace = Math.max(0, this.cursor.x - yAxisFromLeft) / xAxisLength;
+
+        const zoomedCursorInXSpace = cursorInXSpace / this.zoomFactor; // The cursor X-space position within the whole scope with zoom FACTOR taken into account
+
+        //
+        // OK, a horrible abuse of setters and getters - at first sight, the following appears to do
+        // nothing because in the normal world, if X = Y + Z then Y = X - Z - so this.zoomOffset
+        // doesn't look like it's changing.
+        //
+        // But look again - 'zoomOffset has a getter and setter that f*** with the value on fetch and 
+        // store!
+        //
+        // The original code has no doc (which it does now) and bad variable naming. You are welcome!
+        //
+        const cursor = this.zoomOffset + zoomedCursorInXSpace; // Add the current zoom offset to get the "actual" cursor X position
+
+        //
+        // Save the zoom the actual zoom value for this type of scope
+        //
+        this._zoom[this.zoomedScopeType] = Math.min(maxZoom, Math.max(1, zoomIn));
+        this.zoomOffset = cursor - zoomedCursorInXSpace;
+        this.btnZoom.innerHTML = this.zoomFactor.toFixed(1) + "x";
     }
     get zoomOffset() {
-        return this._zoomOffset[this.zoomType];
+        return this._zoomOffset[this.zoomedScopeType];
     }
-    set zoomOffset(zoomOffsetIn) {
-        this._zoomOffset[this.zoomType] = Math.max(0, Math.min(1 - 1 / this.zoom, zoomOffsetIn));
+    set zoomOffset(rawZoomOffset) {
+        // Normalize the raw zoom offset such that is greater than zero and no less than 1-1/current zoom factor
+        this._zoomOffset[this.zoomedScopeType] = Math.max(0, Math.min(1 - 1 / this.zoomFactor, rawZoomOffset));
     }
     resetZoom() {
         this._zoom = { oscilloscope: 1, spectroscope: 1, spectrogram: 1 };
